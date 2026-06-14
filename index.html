@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FitVision Track</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">F</div>
+        <div>
+          <strong>FitVision Track</strong>
+          <span>骑行 / 跑步轨迹与运动数据分析</span>
+        </div>
+      </div>
+      <nav class="nav-tabs">
+        <a class="active" href="#overview">概览</a>
+        <a href="#charts">分析</a>
+        <a href="#ai">AI 建议</a>
+        <a href="#share">分享</a>
+      </nav>
+      <div class="top-actions">
+        <button id="sampleBtn" class="ghost-btn">载入示例</button>
+        <button id="newUploadBtn" class="primary-btn">上传运动文件</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="side-nav">
+        <a class="active" href="#overview">概览</a>
+        <a href="#charts">图表分析</a>
+        <a href="#ai">AI 总结</a>
+        <a href="#share">轨迹卡片</a>
+      </aside>
+
+      <section class="content">
+        <section id="uploadPanel" class="upload-panel">
+          <div class="upload-copy">
+            <p class="eyebrow">FIT / GPX 数据可视化</p>
+            <h1>让每一次骑行和跑步数据都变得清晰可分析</h1>
+            <p>
+              导入 FIT 或 GPX 文件，自动生成轨迹地图、运动图表、训练建议和社交分享卡片。
+            </p>
+          </div>
+          <label id="dropZone" class="drop-zone" for="fileInput">
+            <input id="fileInput" type="file" accept=".fit,.gpx" />
+            <span class="upload-icon">↑</span>
+            <strong>上传你的运动文件</strong>
+            <small>支持拖拽或点击选择，当前仅支持 .fit / .gpx 文件</small>
+          </label>
+          <div class="privacy-note">
+            上传文件可能包含运动路线位置数据，请勿上传敏感路线。文件仅在浏览器本地解析。
+          </div>
+        </section>
+
+        <section id="overview" class="result-panel hidden">
+          <div class="activity-header">
+            <div class="avatar">FT</div>
+            <div class="activity-title">
+              <p id="activityMeta">等待文件解析</p>
+              <h2 id="activityName">本次运动记录</h2>
+              <span id="statusPill" class="status-pill">未上传</span>
+            </div>
+            <div class="header-stats" id="heroStats"></div>
+          </div>
+
+          <div id="missingNotice" class="notice hidden">
+            当前文件部分数据缺失，系统已自动隐藏无法分析的指标。
+          </div>
+
+          <section class="map-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">运动轨迹</p>
+                <h3>地图路线</h3>
+              </div>
+              <div class="map-actions">
+                <button id="mapSettingsBtn" class="ghost-btn">百度配置</button>
+                <button id="resetMapBtn" class="ghost-btn">重置视图</button>
+              </div>
+            </div>
+            <div id="mapConfig" class="map-config hidden">
+              <label>
+                百度地图浏览器端 AK
+                <input id="baiduAkInput" type="password" placeholder="请输入 AK" />
+              </label>
+              <button id="saveBaiduMapBtn" class="primary-btn">保存并加载地图</button>
+              <p>人工操作：需要你在百度地图开放平台创建浏览器端应用，并把 AK 填到这里。</p>
+            </div>
+            <div class="map-wrap">
+              <div id="map"></div>
+              <div id="mapFallback" class="map-fallback">
+                <strong>请先配置百度地图 AK</strong>
+                <span>没有 AK 时仍可查看数据、图表和分享卡片。</span>
+              </div>
+            </div>
+            <div class="elevation-strip">
+              <svg id="elevationChart" viewBox="0 0 1000 130" preserveAspectRatio="none"></svg>
+            </div>
+          </section>
+
+          <section class="metrics-grid" id="metricsGrid"></section>
+        </section>
+
+        <section id="charts" class="charts-panel hidden">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">二维坐标图</p>
+              <h3>运动数据趋势</h3>
+            </div>
+            <span class="hint">点击图表点可联动地图高亮轨迹位置</span>
+          </div>
+          <div id="chartsGrid" class="charts-grid"></div>
+        </section>
+
+        <section id="ai" class="ai-panel hidden">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">AI 运动表现总结</p>
+              <h3>训练分析与下一次建议</h3>
+            </div>
+            <div class="ai-actions">
+              <button id="aiSettingsBtn" class="ghost-btn">大模型配置</button>
+              <button id="regenerateAiBtn" class="ghost-btn">重新生成 AI 分析</button>
+            </div>
+          </div>
+          <div id="aiConfig" class="ai-config hidden">
+            <label>
+              模型服务
+              <select id="aiProviderInput">
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI 兼容</option>
+                <option value="local">仅本地规则</option>
+              </select>
+            </label>
+            <label>
+              API Base URL
+              <input id="aiBaseUrlInput" type="url" placeholder="https://api.deepseek.com" />
+            </label>
+            <label>
+              模型名称
+              <input id="aiModelInput" type="text" placeholder="deepseek-v4-pro" />
+            </label>
+            <label>
+              API Key
+              <input id="aiApiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+            </label>
+            <button id="saveAiConfigBtn" class="primary-btn">保存配置</button>
+            <p>
+              纯前端调用会把 Key 保存在本机浏览器，并向模型服务发送运动摘要与采样数据；公开部署建议改为后端代理。
+            </p>
+          </div>
+          <div id="aiStatus" class="ai-status"></div>
+          <div id="aiGrid" class="ai-grid"></div>
+        </section>
+
+        <section id="share" class="share-panel hidden">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">社交分享</p>
+              <h3>导出轨迹卡片</h3>
+            </div>
+            <button id="openShareBtn" class="primary-btn">导出轨迹卡片</button>
+          </div>
+          <div class="share-preview-shell">
+            <canvas id="shareCanvas" width="1080" height="1440"></canvas>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <dialog id="shareDialog" class="share-dialog">
+      <div class="dialog-head">
+        <h3>轨迹卡片预览</h3>
+        <button id="closeDialogBtn" class="icon-btn" aria-label="关闭">×</button>
+      </div>
+      <canvas id="sharePreviewCanvas" width="1080" height="1440" aria-label="轨迹卡片预览"></canvas>
+      <div class="dialog-actions">
+        <button id="redrawCardBtn" class="ghost-btn">重新生成</button>
+        <button id="downloadCardBtn" class="primary-btn">下载 JPG</button>
+      </div>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
