@@ -1,4 +1,4 @@
-# FitVision Track
+# RidingFIT
 
 骑行 / 跑步轨迹与运动数据分析 Web 应用 MVP。
 
