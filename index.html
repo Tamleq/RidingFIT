@@ -19,6 +19,7 @@
         <a class="active" href="#overview">概览</a>
         <a href="#charts">分析</a>
         <a href="#ai">AI 建议</a>
+        <a href="#history">历史训练</a>
         <a href="#share">分享</a>
       </nav>
       <div class="top-actions">
@@ -32,6 +33,7 @@
         <a class="active" href="#overview">概览</a>
         <a href="#charts">图表分析</a>
         <a href="#ai">AI 总结</a>
+        <a href="#history">历史训练</a>
         <a href="#share">轨迹卡片</a>
       </aside>
 
@@ -130,6 +132,7 @@
             <label>
               模型服务
               <select id="aiProviderInput">
+                <option value="backend">后端 RAG API</option>
                 <option value="deepseek">DeepSeek</option>
                 <option value="openai">OpenAI 兼容</option>
                 <option value="local">仅本地规则</option>
@@ -137,7 +140,7 @@
             </label>
             <label>
               API Base URL
-              <input id="aiBaseUrlInput" type="url" placeholder="https://api.deepseek.com" />
+              <input id="aiBaseUrlInput" type="text" placeholder="/api 或 https://api.deepseek.com" />
             </label>
             <label>
               模型名称
@@ -149,11 +152,61 @@
             </label>
             <button id="saveAiConfigBtn" class="primary-btn">保存配置</button>
             <p>
-              纯前端调用会把 Key 保存在本机浏览器，并向模型服务发送运动摘要与采样数据；公开部署建议改为后端代理。
+              选择后端 RAG API 时，前端会调用 /api/analyze，API Key、embedding 和向量库都应由后端处理；选择 DeepSeek / OpenAI 兼容时才会在浏览器本机保存 Key。
             </p>
           </div>
           <div id="aiStatus" class="ai-status"></div>
           <div id="aiGrid" class="ai-grid"></div>
+        </section>
+
+        <section id="history" class="history-panel hidden">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">个人历史运动数据 RAG</p>
+              <h3>历史训练</h3>
+            </div>
+            <div class="history-actions">
+              <select id="historyTypeFilter" aria-label="按运动类型筛选">
+                <option value="all">全部类型</option>
+                <option value="cycling">骑行</option>
+                <option value="running">跑步</option>
+              </select>
+              <button id="rerankSimilarBtn" class="ghost-btn">重新检索</button>
+            </div>
+          </div>
+          <div class="rag-architecture" aria-label="RAG 工程链路">
+            <article>
+              <h4>前端 RidingFIT</h4>
+              <p>上传 FIT / GPX，展示地图、图表和指标卡片，并把当前运动摘要提交给 /api/analyze。</p>
+            </article>
+            <article>
+              <h4>后端 FastAPI / Node.js</h4>
+              <p>解析运动摘要，生成 embedding，检索历史记录与训练知识，再调用 DeepSeek / OpenAI 兼容模型。</p>
+            </article>
+            <article>
+              <h4>向量库</h4>
+              <p>Chroma / Qdrant / Supabase Vector 分别维护 training_knowledge 与 user_activities collection。</p>
+            </article>
+          </div>
+          <div id="historyGrid" class="history-grid"></div>
+          <div class="history-table-shell">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>类型</th>
+                  <th>距离</th>
+                  <th>时长</th>
+                  <th>均速</th>
+                  <th>心率</th>
+                  <th>功率</th>
+                  <th>爬升</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="historyTableBody"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="share" class="share-panel hidden">

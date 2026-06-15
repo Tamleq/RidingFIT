@@ -2,9 +2,14 @@ const FIT_EPOCH = 631065600;
 const EARTH_RADIUS = 6371008.8;
 const GCJ_A = 6378245.0;
 const GCJ_EE = 0.006693421622965943;
+const HISTORY_STORAGE_KEY = "fitvision.activity.history.v1";
+const HISTORY_CONSENT_KEY = "fitvision.activity.history.consent";
+const MAX_HISTORY_ITEMS = 80;
 
 const state = {
   activity: null,
+  history: [],
+  ragContext: null,
   map: null,
   bmap: null,
   line: null,
@@ -22,6 +27,7 @@ const els = {
   resultPanel: document.querySelector("#overview"),
   chartsPanel: document.querySelector("#charts"),
   aiPanel: document.querySelector("#ai"),
+  historyPanel: document.querySelector("#history"),
   sharePanel: document.querySelector("#share"),
   activityMeta: document.querySelector("#activityMeta"),
   activityName: document.querySelector("#activityName"),
@@ -36,6 +42,9 @@ const els = {
   aiBaseUrlInput: document.querySelector("#aiBaseUrlInput"),
   aiModelInput: document.querySelector("#aiModelInput"),
   aiApiKeyInput: document.querySelector("#aiApiKeyInput"),
+  historyGrid: document.querySelector("#historyGrid"),
+  historyTableBody: document.querySelector("#historyTableBody"),
+  historyTypeFilter: document.querySelector("#historyTypeFilter"),
   missingNotice: document.querySelector("#missingNotice"),
   mapFallback: document.querySelector("#mapFallback"),
   mapConfig: document.querySelector("#mapConfig"),
@@ -52,6 +61,11 @@ document.querySelector("#mapSettingsBtn").addEventListener("click", () => els.ma
 document.querySelector("#saveBaiduMapBtn").addEventListener("click", saveBaiduMapConfig);
 document.querySelector("#resetMapBtn").addEventListener("click", resetMapView);
 document.querySelector("#regenerateAiBtn").addEventListener("click", () => renderAi(state.activity));
+document.querySelector("#rerankSimilarBtn").addEventListener("click", () => {
+  if (!state.activity) return;
+  renderHistoryTraining(state.activity);
+  renderAi(state.activity);
+});
 document.querySelector("#aiSettingsBtn").addEventListener("click", () => els.aiConfig.classList.toggle("hidden"));
 document.querySelector("#saveAiConfigBtn").addEventListener("click", saveAiConfig);
 els.aiProviderInput.addEventListener("change", () => {
@@ -63,6 +77,12 @@ document.querySelector("#openShareBtn").addEventListener("click", openShareDialo
 document.querySelector("#redrawCardBtn").addEventListener("click", redrawSharePreview);
 document.querySelector("#downloadCardBtn").addEventListener("click", downloadCard);
 document.querySelector("#closeDialogBtn").addEventListener("click", () => els.shareDialog.close());
+els.historyTypeFilter.addEventListener("change", () => renderHistoryTraining(state.activity));
+els.historyTableBody.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-history-action]");
+  if (!button) return;
+  handleHistoryAction(button.dataset.historyAction, button.dataset.activityId);
+});
 
 els.fileInput.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
@@ -89,8 +109,10 @@ els.dropZone.addEventListener("drop", (event) => {
 });
 
 loadLocalConfig().finally(() => {
+  state.history = loadActivityHistory();
   restoreBaiduMapConfig();
   restoreAiConfig();
+  renderHistoryTraining(null);
 });
 
 async function handleFile(file) {
@@ -118,6 +140,7 @@ function finalizeActivity(activity) {
     throw new Error("文件中未检测到有效轨迹数据");
   }
   state.activity = enrichActivity(activity);
+  maybeSaveActivity(state.activity);
   renderActivity(state.activity);
 }
 
@@ -284,26 +307,32 @@ function enrichActivity(activity) {
     altitude: hasMetric(points, "altitude"),
   };
   const aiSummary = generateAiSummary(activity.activityType, summary, availableMetrics, points);
+  const activityDate = activity.activityDate || getDate(points[0]?.timestamp);
+  const activityId = activity.activityId || createActivityId(activity.activityType, activityDate);
+  const summaryText = buildActivitySummaryText(activity.activityType, activityDate, summary, availableMetrics, points);
 
   return {
     ...activity,
-    activityDate: activity.activityDate || getDate(points[0]?.timestamp),
+    activityId,
+    activityDate,
     trackPoints: points,
     summary,
     availableMetrics,
     aiSummary,
+    summaryText,
   };
 }
 
 function renderActivity(activity) {
   els.uploadPanel.classList.add("hidden");
-  [els.resultPanel, els.chartsPanel, els.aiPanel, els.sharePanel].forEach((el) => el.classList.remove("hidden"));
+  [els.resultPanel, els.chartsPanel, els.aiPanel, els.historyPanel, els.sharePanel].forEach((el) => el.classList.remove("hidden"));
   els.activityMeta.textContent = `${activity.activityDate || "未知日期"} · ${activity.sourceType.toUpperCase()} · ${activity.trackPoints.length} 个轨迹点`;
   els.activityName.textContent = `${activity.activityType === "running" ? "本次跑步记录" : "本次骑行记录"}`;
   els.statusPill.textContent = "解析成功";
   renderHeroStats(activity);
   renderMetrics(activity);
   renderCharts(activity);
+  renderHistoryTraining(activity);
   renderAi(activity);
   drawShareCard(activity);
   renderElevation(activity);
@@ -434,11 +463,355 @@ function renderElevation(activity) {
   `;
 }
 
+function loadActivityHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item) => item?.activityId && item?.summaryText) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveActivityHistory() {
+  const sorted = [...state.history]
+    .sort((a, b) => new Date(b.startTime || b.date || 0) - new Date(a.startTime || a.date || 0))
+    .slice(0, MAX_HISTORY_ITEMS);
+  state.history = sorted;
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(sorted));
+}
+
+function maybeSaveActivity(activity) {
+  if (!activity) return;
+  let consent = localStorage.getItem(HISTORY_CONSENT_KEY);
+  if (!consent && activity.sourceType !== "sample") {
+    const allowed = window.confirm("是否允许 RidingFIT 保存本次运动摘要，用于后续历史对比和 AI 个性化分析？\n\n系统只保存关键指标和摘要，不保存完整经纬度轨迹点。");
+    consent = allowed ? "allowed" : "denied";
+    localStorage.setItem(HISTORY_CONSENT_KEY, consent);
+  }
+  if (activity.sourceType !== "sample" && consent !== "allowed") return;
+
+  upsertActivityHistory(toStoredActivity(activity));
+}
+
+function upsertActivityHistory(record) {
+  state.history = [record, ...state.history.filter((item) => item.activityId !== record.activityId)];
+  saveActivityHistory();
+}
+
+function toStoredActivity(activity) {
+  const metrics = getActivityMetrics(activity);
+  return {
+    activityId: activity.activityId,
+    fileName: activity.fileName || "",
+    activityType: activity.activityType,
+    date: activity.activityDate || "",
+    startTime: activity.trackPoints[0]?.timestamp || activity.activityDate || "",
+    sourceType: activity.sourceType,
+    metrics,
+    summaryText: activity.summaryText,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function getActivityMetrics(activity) {
+  const s = activity.summary || {};
+  const available = activity.availableMetrics || {};
+  return {
+    distanceKm: numberOrNull((s.distance || 0) / 1000),
+    durationMin: numberOrNull((s.duration || 0) / 60),
+    avgSpeedKmh: available.speed ? numberOrNull(s.avgSpeed * 3.6) : null,
+    maxSpeedKmh: available.speed ? numberOrNull(s.maxSpeed * 3.6) : null,
+    avgHeartRate: available.heartRate ? numberOrNull(s.avgHeartRate) : null,
+    maxHeartRate: available.heartRate ? numberOrNull(s.maxHeartRate) : null,
+    avgPower: available.power ? numberOrNull(s.avgPower) : null,
+    maxPower: available.power ? numberOrNull(s.maxPower) : null,
+    avgCadence: available.cadence ? numberOrNull(s.avgCadence) : null,
+    elevationGainM: available.altitude ? numberOrNull(s.elevationGain) : null,
+  };
+}
+
+function renderHistoryTraining(activity) {
+  const context = activity ? buildRagContext(activity) : { similarActivities: [], trend: buildRecentTrend(null), profile: buildTrainingProfile() };
+  state.ragContext = context;
+  renderHistoryCards(activity, context);
+  renderHistoryTable();
+}
+
+function renderHistoryCards(activity, context) {
+  const currentCard = activity
+    ? `<article class="history-card wide">
+        <h4>本次运动摘要</h4>
+        <p>${escapeHtml(activity.summaryText)}</p>
+      </article>`
+    : `<article class="history-card wide empty-state">
+        <h4>本次运动摘要</h4>
+        <p>上传或载入一次运动后，这里会生成可用于 RAG 检索的结构化摘要。</p>
+      </article>`;
+
+  const similarItems = context.similarActivities.length
+    ? context.similarActivities.map((item) => `
+        <li>
+          <strong>${escapeHtml(item.date || "未知日期")} ${activityTypeLabel(item.activityType)}</strong>
+          <span>${Math.round(item.similarityScore * 100)}% · ${escapeHtml(item.reason)}</span>
+        </li>
+      `).join("")
+    : "<li><span>暂无可检索的历史相似记录。</span></li>";
+
+  const profile = context.profile;
+  els.historyGrid.innerHTML = `
+    ${currentCard}
+    <article class="history-card">
+      <h4>历史相似运动</h4>
+      <ul class="reference-list">${similarItems}</ul>
+    </article>
+    <article class="history-card">
+      <h4>最近趋势</h4>
+      <p>${escapeHtml(context.trend.summary)}</p>
+    </article>
+    <article class="history-card">
+      <h4>训练画像</h4>
+      <p>${escapeHtml(profile.summary)}</p>
+    </article>
+  `;
+}
+
+function renderHistoryTable() {
+  const filter = els.historyTypeFilter.value;
+  const items = state.history
+    .filter((item) => filter === "all" || item.activityType === filter)
+    .sort((a, b) => new Date(b.startTime || b.date || 0) - new Date(a.startTime || a.date || 0));
+
+  if (!items.length) {
+    els.historyTableBody.innerHTML = `<tr><td colspan="9" class="empty-cell">暂无历史运动记录</td></tr>`;
+    return;
+  }
+
+  els.historyTableBody.innerHTML = items.map((item) => {
+    const m = item.metrics || {};
+    return `
+      <tr>
+        <td>${escapeHtml(item.date || "未知")}</td>
+        <td>${activityTypeLabel(item.activityType)}</td>
+        <td>${formatOptionalNumber(m.distanceKm, " km", 1)}</td>
+        <td>${formatOptionalNumber(m.durationMin, " min", 0)}</td>
+        <td>${formatOptionalNumber(m.avgSpeedKmh, " km/h", 1)}</td>
+        <td>${formatOptionalNumber(m.avgHeartRate, " bpm", 0)}</td>
+        <td>${formatOptionalNumber(m.avgPower, " W", 0)}</td>
+        <td>${formatOptionalNumber(m.elevationGainM, " m", 0)}</td>
+        <td>
+          <button class="table-action" data-history-action="compare" data-activity-id="${escapeHtml(item.activityId)}">对比</button>
+          <button class="table-action danger" data-history-action="delete" data-activity-id="${escapeHtml(item.activityId)}">删除</button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function handleHistoryAction(action, activityId) {
+  const record = state.history.find((item) => item.activityId === activityId);
+  if (!record) return;
+  if (action === "delete") {
+    state.history = state.history.filter((item) => item.activityId !== activityId);
+    saveActivityHistory();
+    renderHistoryTraining(state.activity);
+    showToast("历史记录已删除，关联摘要也已移除");
+    return;
+  }
+  if (action === "compare" && state.activity) {
+    state.ragContext = {
+      ...buildRagContext(state.activity),
+      similarActivities: [buildSimilarityResult(record, state.activity, 1)],
+    };
+    renderHistoryCards(state.activity, state.ragContext);
+    renderAi(state.activity);
+    location.hash = "#ai";
+  }
+}
+
+function buildRagContext(activity) {
+  const similarActivities = retrieveSimilarActivities(activity, 3);
+  return {
+    similarActivities,
+    trend: buildRecentTrend(activity),
+    profile: buildTrainingProfile(),
+    historyCount: state.history.filter((item) => item.activityId !== activity?.activityId).length,
+  };
+}
+
+function retrieveSimilarActivities(activity, topK = 3) {
+  if (!activity) return [];
+  return state.history
+    .filter((item) => item.activityId !== activity.activityId && item.activityType === activity.activityType)
+    .map((item) => buildSimilarityResult(item, activity))
+    .sort((a, b) => b.similarityScore - a.similarityScore)
+    .slice(0, topK);
+}
+
+function buildSimilarityResult(record, activity, forcedScore) {
+  const current = toStoredActivity(activity);
+  const similarityScore = forcedScore ?? calculateActivitySimilarity(current, record);
+  return {
+    ...record,
+    similarityScore,
+    reason: buildSimilarityReason(current, record),
+  };
+}
+
+function calculateActivitySimilarity(current, historical) {
+  const textScore = jaccardSimilarity(tokenizeSummary(current.summaryText), tokenizeSummary(historical.summaryText));
+  const metricScore = metricSimilarity(current.metrics || {}, historical.metrics || {});
+  return clamp(textScore * 0.48 + metricScore * 0.52, 0, 1);
+}
+
+function tokenizeSummary(text) {
+  const tokens = String(text || "").toLowerCase().match(/[\u4e00-\u9fa5]{2,}|[a-z0-9]+/g) || [];
+  return new Set(tokens);
+}
+
+function jaccardSimilarity(a, b) {
+  if (!a.size || !b.size) return 0;
+  let overlap = 0;
+  a.forEach((token) => {
+    if (b.has(token)) overlap += 1;
+  });
+  return overlap / Math.max(1, new Set([...a, ...b]).size);
+}
+
+function metricSimilarity(a, b) {
+  const keys = ["distanceKm", "durationMin", "avgSpeedKmh", "avgHeartRate", "avgPower", "elevationGainM"];
+  const scores = keys.map((key) => metricValueSimilarity(a[key], b[key])).filter(validNumber);
+  return scores.length ? average(scores) : 0;
+}
+
+function metricValueSimilarity(a, b) {
+  if (!validNumber(a) || !validNumber(b) || a <= 0 || b <= 0) return null;
+  return clamp(1 - Math.abs(a - b) / Math.max(a, b), 0, 1);
+}
+
+function buildSimilarityReason(current, historical) {
+  const pairs = [
+    ["distanceKm", "距离接近"],
+    ["durationMin", "时长接近"],
+    ["avgSpeedKmh", "平均速度接近"],
+    ["avgHeartRate", "平均心率接近"],
+    ["avgPower", "平均功率接近"],
+    ["elevationGainM", "爬升接近"],
+  ];
+  const reasons = pairs
+    .filter(([key]) => metricValueSimilarity(current.metrics?.[key], historical.metrics?.[key]) >= 0.86)
+    .map(([, label]) => label);
+  if (reasons.length) return reasons.slice(0, 3).join("、");
+  if (current.activityType === historical.activityType) return `同为${activityTypeLabel(current.activityType)}，训练摘要特征相似`;
+  return "运动摘要语义相似";
+}
+
+function buildRecentTrend(activity) {
+  const items = state.history
+    .filter((item) => !activity || item.activityType === activity.activityType)
+    .sort((a, b) => new Date(b.startTime || b.date || 0) - new Date(a.startTime || a.date || 0))
+    .slice(0, 5);
+  if (items.length < 3) {
+    return {
+      items,
+      summary: "当前历史运动记录较少，本次分析主要基于已有记录和本次运动数据，历史趋势判断仅供参考。",
+    };
+  }
+
+  const latest = items[0].metrics || {};
+  const previous = items.slice(1).map((item) => item.metrics || {});
+  const avgSpeed = average(previous.map((m) => m.avgSpeedKmh));
+  const avgHr = average(previous.map((m) => m.avgHeartRate));
+  const avgPower = average(previous.map((m) => m.avgPower));
+  const notes = [];
+  if (validNumber(latest.avgSpeedKmh) && validNumber(avgSpeed)) {
+    notes.push(latest.avgSpeedKmh >= avgSpeed ? "最近一次平均速度高于前几次均值" : "最近一次平均速度低于前几次均值");
+  }
+  if (validNumber(latest.avgHeartRate) && validNumber(avgHr)) {
+    notes.push(latest.avgHeartRate > avgHr + 5 ? "同类训练中心率偏高，需要关注恢复" : "心率水平整体稳定");
+  }
+  if (validNumber(latest.avgPower) && validNumber(avgPower)) {
+    notes.push(latest.avgPower >= avgPower ? "功率输出保持或略有提升" : "功率输出低于近期均值");
+  }
+  return {
+    items,
+    summary: notes.length ? `最近 ${items.length} 次${activityTypeLabel(items[0].activityType)}：${notes.join("；")}。` : "最近记录可用于对比，但关键指标缺失较多，趋势判断有限。",
+  };
+}
+
+function buildTrainingProfile() {
+  const items = state.history;
+  if (items.length < 5) {
+    return {
+      summary: `继续上传运动记录，累计 5 次后可生成个人训练画像。当前已有 ${items.length} 次。`,
+    };
+  }
+  const typeCounts = items.reduce((map, item) => {
+    map[item.activityType] = (map[item.activityType] || 0) + 1;
+    return map;
+  }, {});
+  const mainType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "cycling";
+  const typed = items.filter((item) => item.activityType === mainType);
+  const distances = typed.map((item) => item.metrics?.distanceKm).filter(validNumber);
+  const durations = typed.map((item) => item.metrics?.durationMin).filter(validNumber);
+  const avgHr = average(typed.map((item) => item.metrics?.avgHeartRate));
+  const range = (values, unit) => values.length ? `${Math.round(Math.min(...values))}-${Math.round(Math.max(...values))}${unit}` : "数据不足";
+  return {
+    summary: `主要运动类型：${activityTypeLabel(mainType)}；常见距离：${range(distances, " km")}；常见时长：${range(durations, " min")}；${avgHr ? `平均心率约 ${Math.round(avgHr)} bpm；` : ""}建议持续观察后半程速度、心率漂移和爬升路段输出稳定性。`,
+  };
+}
+
+function buildActivitySummaryText(type, date, summary, available, points) {
+  const sport = activityTypeLabel(type);
+  const parts = [
+    `运动类型：${sport}`,
+    `运动日期：${date || "未知"}`,
+    `距离：${formatOptionalNumber((summary.distance || 0) / 1000, " 公里", 1)}`,
+    `时长：${formatOptionalNumber((summary.duration || 0) / 60, " 分钟", 0)}`,
+  ];
+  if (available.speed) parts.push(`平均速度：${(summary.avgSpeed * 3.6).toFixed(1)} km/h`);
+  if (available.heartRate) parts.push(`平均心率：${Math.round(summary.avgHeartRate)} bpm`, `最大心率：${Math.round(summary.maxHeartRate)} bpm`);
+  if (available.power) parts.push(`平均功率：${Math.round(summary.avgPower)} W`, `最大功率：${Math.round(summary.maxPower)} W`);
+  if (available.cadence) parts.push(`平均踏频：${Math.round(summary.avgCadence)} rpm`);
+  if (available.altitude && summary.elevationGain) parts.push(`累计爬升：${Math.round(summary.elevationGain)} m`);
+  parts.push(`表现特征：${buildPerformanceFeatures(summary, available, points).join("，")}。`);
+  parts.push(`训练判断：${buildTrainingJudgement(summary, available, points)}`);
+  return parts.join("\n");
+}
+
+function buildPerformanceFeatures(summary, available, points) {
+  const features = [];
+  const halfSpeed = splitHalfTrend(points, "speed");
+  const halfHr = splitHalfTrend(points, "heartRate");
+  if (available.speed) features.push(halfSpeed < -0.08 ? "后半程速度下降" : "速度节奏较稳定");
+  if (available.heartRate) features.push(halfHr > 0.06 ? "后半程心率抬升" : "心率变化可控");
+  if (available.power) features.push(splitHalfTrend(points, "power") < -0.08 ? "后半程功率下降" : "功率输出较稳定");
+  if (available.altitude && summary.elevationGain > 250) features.push("有一定爬升负荷");
+  return features.length ? features : ["基础轨迹和训练量完整"];
+}
+
+function buildTrainingJudgement(summary, available, points) {
+  const halfSpeed = splitHalfTrend(points, "speed");
+  const halfHr = splitHalfTrend(points, "heartRate");
+  if (available.speed && available.heartRate && halfSpeed < -0.08 && halfHr > 0.06) {
+    return "后半程存在轻微疲劳迹象，建议结合补给和恢复状态复盘。";
+  }
+  if (available.speed && halfSpeed >= -0.04) return "本次节奏控制较稳定，可作为后续同类训练对比基准。";
+  return "数据字段有限，建议补充心率、功率或踏频以提升判断精度。";
+}
+
+function createActivityId(type, date) {
+  const prefix = type === "running" ? "run" : "ride";
+  const day = (date || new Date().toISOString().slice(0, 10)).replaceAll("-", "");
+  return `${prefix}_${day}_${Date.now().toString(36)}`;
+}
+
 async function renderAi(activity) {
   if (!activity) return;
-  const fallback = generateAiSummary(activity.activityType, activity.summary, activity.availableMetrics, activity.trackPoints);
+  const ragContext = state.ragContext || buildRagContext(activity);
+  const fallback = generateRagTrainingSummary(activity, ragContext);
   activity.aiSummary = fallback;
-  renderAiCards(fallback, "当前使用本地规则分析");
+  renderAiCards(fallback, ragContext, "当前使用本地规则 + 历史检索分析");
   drawShareCard(activity);
 
   const config = getAiConfig();
@@ -447,31 +820,33 @@ async function renderAi(activity) {
   const requestId = ++state.aiRequestId;
   const button = document.querySelector("#regenerateAiBtn");
   button.disabled = true;
-  renderAiCards(fallback, `正在调用 ${config.model} 生成高级训练分析...`);
+  renderAiCards(fallback, ragContext, `正在调用 ${config.model} 生成 RAG 训练分析...`);
 
   try {
-    const remoteSummary = await requestRemoteAiAnalysis(activity, config);
+    const remoteSummary = await requestRemoteAiAnalysis(activity, config, ragContext);
     if (requestId !== state.aiRequestId) return;
     activity.aiSummary = normalizeAiSummary(remoteSummary, fallback);
-    renderAiCards(activity.aiSummary, `由 ${config.model} 生成，建议结合自身身体状态判断`);
+    renderAiCards(activity.aiSummary, ragContext, `由 ${config.model} 基于本次运动和历史相似记录生成`);
     drawShareCard(activity);
-    showToast("高级 AI 训练分析已生成");
+    showToast("RAG 训练分析已生成");
   } catch (error) {
     if (requestId !== state.aiRequestId) return;
-    renderAiCards(fallback, `远程分析失败，已保留本地规则分析：${error.message || "请检查模型配置"}`);
+    renderAiCards(fallback, ragContext, `远程分析失败，已保留本地 RAG 分析：${error.message || "请检查模型配置"}`);
     showToast("AI API 调用失败，已使用本地分析");
   } finally {
     if (requestId === state.aiRequestId) button.disabled = false;
   }
 }
 
-function renderAiCards(summary, statusText = "") {
+function renderAiCards(summary, ragContext, statusText = "") {
   const items = [
     ["本次运动表现总结", summary.performanceSummary],
-    ["数据亮点", summary.highlights],
+    ["与历史相似运动对比", summary.historyComparison],
+    ["最近训练趋势判断", summary.recentTrend],
+    ["进步点", summary.highlights],
     ["可能存在的问题", summary.problems],
     ["下一次训练建议", summary.trainingAdvice],
-    ["分享卡片短句", summary.shareCardSentence],
+    ["本次分析参考记录", summary.references || formatReferences(ragContext?.similarActivities || [])],
   ];
   els.aiStatus.textContent = statusText;
   els.aiGrid.innerHTML = "";
@@ -618,10 +993,14 @@ function getAiProviderDefaults(provider) {
   if (provider === "openai") {
     return { baseUrl: "https://api.openai.com/v1", model: "" };
   }
+  if (provider === "backend") {
+    return { baseUrl: "/api", model: "backend-rag" };
+  }
   return { baseUrl: "", model: "" };
 }
 
 function canUseRemoteAi(config) {
+  if (config.provider === "backend") return Boolean(config.baseUrl);
   return config.provider !== "local" && Boolean(config.baseUrl && config.model && isUsableSecret(config.apiKey));
 }
 
@@ -633,7 +1012,11 @@ function isUsableSecret(value) {
   return Boolean(value && !/替换|your|sk-\.\.\.|placeholder/i.test(value));
 }
 
-async function requestRemoteAiAnalysis(activity, config) {
+async function requestRemoteAiAnalysis(activity, config, ragContext) {
+  if (config.provider === "backend") {
+    return requestBackendRagAnalysis(activity, config, ragContext);
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
@@ -652,15 +1035,16 @@ async function requestRemoteAiAnalysis(activity, config) {
           role: "system",
           content: [
             "你是专业耐力运动教练，擅长骑行和跑步训练分析。",
-            "根据用户上传的运动摘要给出中文训练复盘。",
+            "根据用户上传的当前运动摘要、历史相似运动和最近趋势给出中文 RAG 训练复盘。",
+            "不要做医学诊断；数据缺失时要明确说明；不要编造不存在的历史记录。",
             "只返回 JSON，不要 Markdown，不要代码块。",
           ].join(""),
         },
         {
           role: "user",
           content: JSON.stringify({
-            instruction: "生成结构化训练分析。必须返回 performanceSummary、highlights、problems、trainingAdvice、shareCardSentence 五个字符串字段。建议具体、可执行，避免医疗诊断。",
-            activity: buildTrainingAnalysisPayload(activity),
+            instruction: "生成结构化训练分析。必须返回 performanceSummary、historyComparison、recentTrend、highlights、problems、trainingAdvice、references、shareCardSentence 八个字符串字段。建议具体、可执行，引用记录只能来自 provided references。",
+            activity: buildTrainingAnalysisPayload(activity, ragContext),
           }),
         },
       ],
@@ -678,7 +1062,50 @@ async function requestRemoteAiAnalysis(activity, config) {
   return parseModelJson(content);
 }
 
-function buildTrainingAnalysisPayload(activity) {
+async function requestBackendRagAnalysis(activity, config, ragContext) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  const response = await fetch(`${config.baseUrl.replace(/\/+$/, "")}/analyze`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      question: "这次运动相比之前怎么样？",
+      top_k: 3,
+      activity: buildTrainingAnalysisPayload(activity, ragContext),
+    }),
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`HTTP ${response.status}${message ? `：${message.slice(0, 120)}` : ""}`);
+  }
+
+  const data = await response.json();
+  return normalizeBackendAnalyzeResponse(data, ragContext);
+}
+
+function normalizeBackendAnalyzeResponse(data, ragContext) {
+  if (data?.performanceSummary || data?.trainingAdvice) return data;
+  const answer = data?.answer || data?.analysis || data?.result || "";
+  const references = data?.references || data?.similar_activities || data?.similarActivities || ragContext?.similarActivities || [];
+  return {
+    performanceSummary: answer || "后端 RAG API 已返回结果，但没有提供 answer 字段。",
+    historyComparison: data?.historyComparison || data?.history_comparison || "",
+    recentTrend: data?.recentTrend || data?.recent_trend || "",
+    highlights: data?.highlights || data?.progress || "",
+    problems: data?.problems || data?.risks || "",
+    trainingAdvice: data?.trainingAdvice || data?.training_advice || "",
+    references: Array.isArray(references)
+      ? references.map((item) => `${item.date || item.activity_id || item.activityId || "历史记录"}：${item.reason || "被后端检索引用"}`).join("；")
+      : String(references || ""),
+    shareCardSentence: data?.shareCardSentence || "历史对比分析已生成。",
+  };
+}
+
+function buildTrainingAnalysisPayload(activity, ragContext = state.ragContext) {
   const points = activity.trackPoints;
   return {
     sport: activity.activityType === "running" ? "running" : "cycling",
@@ -712,6 +1139,21 @@ function buildTrainingAnalysisPayload(activity) {
       heartRate: validNumber(point.heartRate) ? Math.round(point.heartRate) : null,
       altitude: validNumber(point.altitude) ? Math.round(point.altitude) : null,
     })),
+    rag: {
+      currentActivitySummary: activity.summaryText,
+      similarActivities: (ragContext?.similarActivities || []).map((item) => ({
+        activityId: item.activityId,
+        date: item.date,
+        activityType: item.activityType,
+        similarityScore: numberOrNull(item.similarityScore),
+        reason: item.reason,
+        metrics: item.metrics,
+        summaryText: item.summaryText,
+      })),
+      recentActivityTrend: ragContext?.trend?.summary || "",
+      trainingProfile: ragContext?.profile?.summary || "",
+      historyCount: ragContext?.historyCount || 0,
+    },
   };
 }
 
@@ -735,9 +1177,12 @@ function normalizeAiSummary(value, fallback) {
   };
   return {
     performanceSummary: read("performanceSummary"),
+    historyComparison: read("historyComparison"),
+    recentTrend: read("recentTrend"),
     highlights: read("highlights"),
     problems: read("problems"),
     trainingAdvice: read("trainingAdvice"),
+    references: read("references"),
     shareCardSentence: read("shareCardSentence").slice(0, 34),
   };
 }
@@ -1027,6 +1472,7 @@ async function downloadCard() {
 }
 
 function loadSample() {
+  seedSampleHistory();
   const points = [];
   const start = new Date("2026-06-14T09:00:00+08:00").getTime();
   let distance = 0;
@@ -1053,6 +1499,108 @@ function loadSample() {
     trackPoints: points,
     sourceType: "sample",
   });
+}
+
+function seedSampleHistory() {
+  if (state.history.length >= 4) return;
+  const samples = [
+    ["ride_20260525_demo", "2026-05-25", 38.4, 96, 24.0, 148, 162, 180, "中等强度耐力骑，平均速度和心率稳定，后半程略有掉速。"],
+    ["ride_20260601_demo", "2026-06-01", 41.2, 104, 24.3, 151, 165, 260, "城市耐力骑，距离接近 40 公里，平路巡航稳定，爬升负荷较低。"],
+    ["ride_20260608_demo", "2026-06-08", 44.8, 112, 24.6, 154, 171, 340, "爬坡骑行，距离和爬升较高，后半程心率抬升且速度下降。"],
+    ["ride_20260612_demo", "2026-06-12", 30.5, 75, 24.4, 146, 155, 120, "短距离有氧骑，节奏轻松，适合作为恢复训练记录。"],
+  ];
+  samples.forEach(([activityId, date, distanceKm, durationMin, avgSpeedKmh, avgHeartRate, avgPower, elevationGainM, text]) => {
+    upsertActivityHistory({
+      activityId,
+      fileName: `${date}-demo.gpx`,
+      activityType: "cycling",
+      date,
+      startTime: `${date}T08:00:00+08:00`,
+      sourceType: "sample",
+      metrics: {
+        distanceKm,
+        durationMin,
+        avgSpeedKmh,
+        maxSpeedKmh: avgSpeedKmh + 11,
+        avgHeartRate,
+        maxHeartRate: avgHeartRate + 24,
+        avgPower,
+        maxPower: avgPower + 230,
+        avgCadence: 82,
+        elevationGainM,
+      },
+      summaryText: `运动类型：骑行\n运动日期：${date}\n距离：${distanceKm} 公里\n时长：${durationMin} 分钟\n平均速度：${avgSpeedKmh} km/h\n平均心率：${avgHeartRate} bpm\n平均功率：${avgPower} W\n累计爬升：${elevationGainM} m\n表现特征：${text}\n训练判断：可作为当前运动的历史对比样本。`,
+      createdAt: new Date().toISOString(),
+    });
+  });
+}
+
+function generateRagTrainingSummary(activity, ragContext) {
+  const base = generateAiSummary(activity.activityType, activity.summary, activity.availableMetrics, activity.trackPoints);
+  const similar = ragContext?.similarActivities || [];
+  const currentMetrics = getActivityMetrics(activity);
+  const top = similar[0];
+  const historyComparison = top
+    ? buildHistoryComparisonSentence(currentMetrics, top)
+    : "当前没有足够的同类历史记录可检索，本次先基于当前运动数据生成分析。";
+  const references = formatReferences(similar);
+  return {
+    ...base,
+    performanceSummary: `${base.performanceSummary}${ragContext?.historyCount < 3 ? " 当前历史记录偏少，历史趋势判断仅供参考。" : ""}`,
+    historyComparison,
+    recentTrend: ragContext?.trend?.summary || "暂无最近趋势数据。",
+    highlights: buildProgressSentence(currentMetrics, similar) || base.highlights,
+    problems: buildRiskSentence(activity, ragContext) || base.problems,
+    references,
+  };
+}
+
+function buildHistoryComparisonSentence(current, top) {
+  const m = top.metrics || {};
+  const parts = [`最相似记录是 ${top.date || "未知日期"} 的${activityTypeLabel(top.activityType)}，相似度 ${Math.round(top.similarityScore * 100)}%，原因是${top.reason}。`];
+  if (validNumber(current.avgSpeedKmh) && validNumber(m.avgSpeedKmh)) {
+    const diff = current.avgSpeedKmh - m.avgSpeedKmh;
+    parts.push(`本次平均速度${diff >= 0 ? "高" : "低"} ${Math.abs(diff).toFixed(1)} km/h。`);
+  }
+  if (validNumber(current.avgHeartRate) && validNumber(m.avgHeartRate)) {
+    const diff = current.avgHeartRate - m.avgHeartRate;
+    parts.push(`平均心率${diff >= 0 ? "高" : "低"} ${Math.abs(Math.round(diff))} bpm。`);
+  }
+  return parts.join("");
+}
+
+function buildProgressSentence(current, similar) {
+  if (!similar.length) return "";
+  const avgSpeed = average(similar.map((item) => item.metrics?.avgSpeedKmh));
+  const avgPower = average(similar.map((item) => item.metrics?.avgPower));
+  const notes = [];
+  if (validNumber(current.avgSpeedKmh) && validNumber(avgSpeed)) {
+    notes.push(current.avgSpeedKmh >= avgSpeed ? "平均速度高于相似历史记录均值" : "平均速度低于相似历史记录均值，适合复盘配速或路况差异");
+  }
+  if (validNumber(current.avgPower) && validNumber(avgPower)) {
+    notes.push(current.avgPower >= avgPower ? "功率输出较相似记录更高" : "功率输出未超过相似记录均值");
+  }
+  return notes.join("；");
+}
+
+function buildRiskSentence(activity, ragContext) {
+  const halfSpeed = splitHalfTrend(activity.trackPoints, "speed");
+  const halfHr = splitHalfTrend(activity.trackPoints, "heartRate");
+  const notes = [];
+  if (activity.availableMetrics.heartRate && activity.availableMetrics.speed && halfSpeed < -0.08 && halfHr > 0.06) {
+    notes.push("本次后半程速度下降且心率抬升，可能存在恢复不足、补给不足或前半程强度偏高。");
+  }
+  if (ragContext?.historyCount < 3) {
+    notes.push("历史记录少于 3 条，长期趋势判断需要更多样本验证。");
+  }
+  if (!activity.availableMetrics.heartRate) notes.push("本次文件缺少心率数据，因此无法判断心肺负荷和恢复状态。");
+  if (!activity.availableMetrics.power) notes.push("本次文件缺少功率数据，因此功率稳定性仅能通过速度、爬升和心率间接判断。");
+  return notes.join("");
+}
+
+function formatReferences(items) {
+  if (!items.length) return "暂无引用历史记录。";
+  return items.map((item) => `${item.date || "未知日期"}：${item.reason}（相似度 ${Math.round(item.similarityScore * 100)}%）`).join("；");
 }
 
 function generateAiSummary(type, summary, available, points) {
@@ -1313,6 +1861,24 @@ function formatDuration(seconds) {
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   return [h, m, s].map((value, i) => i === 0 ? String(value) : String(value).padStart(2, "0")).join(":");
+}
+
+function formatOptionalNumber(value, unit = "", digits = 1) {
+  if (!validNumber(value)) return "—";
+  return `${Number(value).toFixed(digits)}${unit}`;
+}
+
+function activityTypeLabel(type) {
+  return type === "running" ? "跑步" : "骑行";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function showToast(message) {

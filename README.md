@@ -76,6 +76,53 @@ window.FITVISION_CONFIG = {
 
 隐私与安全：当前 MVP 是纯前端应用，API Key 会保存在浏览器本机，并且请求会把运动摘要、趋势和抽样后的速度/心率/功率等数据发给模型服务；不会发送经纬度轨迹点。公开部署或多人使用时，建议把大模型调用改到后端代理中。
 
+## 个人历史运动 RAG MVP
+
+应用现在会在用户允许后，把每次解析出的运动摘要和关键指标保存到浏览器 `localStorage`，用于后续历史对比和 AI 个性化分析。保存内容包括距离、时长、速度、心率、功率、踏频、爬升和结构化摘要，不保存完整经纬度轨迹点。
+
+当前静态版实现了：
+
+- 历史训练 Tab 与历史活动表格
+- 活动摘要自动生成
+- 本地摘要“向量化”相似检索模拟：摘要词元相似度 + 指标相似度加权
+- Top 3 相似历史活动、相似度和相似原因展示
+- 最近运动趋势总结
+- 累计 5 条记录后的训练画像
+- AI 建议携带当前运动、历史相似运动、最近趋势和引用依据
+- 历史记录删除
+
+点击「载入示例」会自动加入几条演示历史记录，方便查看 RAG 检索、历史趋势和引用依据。后续如果升级为后端架构，可以把 `localStorage` 历史库替换为 FastAPI + SQLite/ChromaDB，把相似检索替换为真实 embedding 检索。
+
+### 后端 RAG API 目标链路
+
+当前静态版已经把前端需要提交给后端的 RAG 上下文整理好。进入「AI 建议」后选择「后端 RAG API」，前端会调用：
+
+```http
+POST /api/analyze
+```
+
+目标架构：
+
+```text
+前端 RidingFIT
+├─ 上传 FIT / GPX
+├─ 展示地图、图表、指标卡片
+└─ 调用 /api/analyze
+
+后端 FastAPI / Node.js
+├─ 解析运动摘要
+├─ 生成 embedding
+├─ 写入向量数据库
+├─ 检索相关训练知识 / 历史记录
+└─ 调用 DeepSeek / OpenAI 兼容模型生成建议
+
+向量库 Chroma / Qdrant / Supabase Vector
+├─ training_knowledge
+└─ user_activities
+```
+
+建议后端优先使用 FastAPI + SQLite + ChromaDB 落 MVP：SQLite 保存活动结构化指标，ChromaDB 保存 `summary_text` embedding；模型和 embedding API Key 只放在后端环境变量。详细接口契约见 [docs/RAG_BACKEND_API.md](docs/RAG_BACKEND_API.md)。
+
 ## 已实现
 
 - FIT / GPX 文件上传入口
@@ -88,6 +135,8 @@ window.FITVISION_CONFIG = {
 - 图表点击联动地图轨迹点
 - 本地规则生成的中文训练分析
 - DeepSeek / OpenAI 兼容 API 生成高级训练分析
+- 个人历史训练记录、相似活动检索和 RAG 上下文分析
+- 可切换后端 `/api/analyze` 的 RAG API 调用模式
 - JPG 轨迹分享卡片生成与下载
 
 ## 说明
